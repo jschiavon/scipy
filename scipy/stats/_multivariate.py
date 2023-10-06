@@ -13,6 +13,7 @@ from scipy.linalg.blas import drot
 from scipy.linalg._misc import LinAlgError
 from scipy.linalg.lapack import get_lapack_funcs
 from ._continuous_distns import norm
+from ._continuous_distns import _norm_cdf, _norm_logcdf
 from ._discrete_distns import binom
 from . import _mvn, _covariance, _rcont
 from ._qmvnt import _qmvt
@@ -20,6 +21,7 @@ from ._morestats import directional_stats
 from scipy.optimize import root_scalar
 
 __all__ = ['multivariate_normal',
+           'multivariate_skewnormal',
            'matrix_normal',
            'dirichlet',
            'dirichlet_multinomial',
@@ -966,6 +968,678 @@ for name in ['logpdf', 'pdf', 'logcdf', 'cdf', 'rvs']:
     method_frozen.__doc__ = doccer.docformat(method.__doc__,
                                              mvn_docdict_noparams)
     method.__doc__ = doccer.docformat(method.__doc__, mvn_docdict_params)
+
+
+_mvsn_doc_default_callparams = """\
+loc : array_like, default: ``[0]``
+    Location parameter of the distribution.
+cov : array_like or `Covariance`, default: ``[1]``
+    Symmetric positive (semi)definite covariance matrix of the distribution.
+skew : array_like, default: ``[0]``
+    Skewness parameter of the distribution.
+allow_singular : bool, default: ``False``
+    Whether to allow a singular covariance matrix. This is ignored if `cov` is
+    a `Covariance` object.
+"""
+
+_mvsn_doc_callparams_note = """\
+Setting the parameter `loc` to `None` is equivalent to having `loc`
+be the zero-vector. The parameter `cov` can be a scalar, in which case
+the covariance matrix is the identity times that value, a vector of
+diagonal entries for the covariance matrix, a two-dimensional array_like,
+or a `Covariance` object. Setting the parameter `skew` to `None` is equivalent
+to having `skew` be the zero-vector.
+"""
+
+_mvsn_doc_frozen_callparams = ""
+
+_mvsn_doc_frozen_callparams_note = """\
+See class definition for a detailed description of parameters."""
+
+mvsn_docdict_params = {
+    '_mvsn_doc_default_callparams': _mvsn_doc_default_callparams,
+    '_mvsn_doc_callparams_note': _mvsn_doc_callparams_note,
+    '_doc_random_state': _doc_random_state
+}
+
+mvsn_docdict_noparams = {
+    '_mvsn_doc_default_callparams': _mvsn_doc_frozen_callparams,
+    '_mvsn_doc_callparams_note': _mvsn_doc_frozen_callparams_note,
+    '_doc_random_state': _doc_random_state
+}
+
+
+def _cov2cor(mat):
+    """
+    Function that return the correlation from a covariance matrix.
+    
+    Requires the diagonal elements of mat to be positives.
+    
+    Parameters
+    ----------
+    mat : ndarray
+        Matrix to scale
+    """
+    di = np.sqrt(np.diag(mat))
+    return di, np.einsum('i,ij,j->ij', 1/di, mat, 1/di)
+
+
+def _compute_delta(d, omega, cor=False):
+    """
+    Compute parameter delta for the skew-normal distribution.
+    
+    Parameters
+    ----------
+    d : ndarray
+        skewness parameter
+    omega : ndarray
+        covariance parameter
+    cor : bool
+        if True expect that `omega` is a correlation and `d` is 
+        opportunely scaled by the variances vector
+    """
+    o_d = np.dot(omega, d)
+    if ~cor:
+        di = 1 / np.sqrt(np.diag(omega))
+        o_d = di * o_d
+    d_o_d = np.dot(d, o_d)
+    sqr_den = np.sqrt(1 + d_o_d)
+    return o_d / sqr_den
+
+
+class multivariate_skewnormal_gen(multi_rv_generic):
+    r"""A multivariate skew-normal random variable.
+    
+    The `loc` keyword specifies the location parameter. The `cov` keyword specifies
+    the covariance matrix, the 'skew' keyword specifies the skewness parameter
+    
+    Methods
+    -------
+    ``pdf(x, loc=None, cov=1, skew=None, allow_singular=False)``
+        Probability density function.
+    ``logpdf(x, loc=None, cov=1, skew=None, allow_singular=False)``
+        Log of the probability density function.
+    ``cdf(x, loc=None, cov=1, skew=None, allow_singular=False, maxpts=1000000*dim, abseps=1e-5, releps=1e-5)``
+        Cumulative distribution function.
+    ``logcdf(x, loc=None, cov=1, skew=None, allow_singular=False, maxpts=1000000*dim, abseps=1e-5, releps=1e-5)``
+        Log of the cumulative distribution function.
+    ``rvs(loc=None, cov=1, skew=None, size=1, random_state=None)``
+        Draw random samples from a multivariate skew-normal distribution.
+    ``entropy()``
+        Compute the differential entropy of the skew-multivariate normal.
+    
+    Parameters
+    ----------
+    %(_mvsn_doc_default_callparams)s
+    %(_doc_random_state)s
+    Notes
+    -----
+    %(_mvsn_doc_callparams_note)s
+    
+    The `cov` parameter corresponds to the parameter :math:`\Omega` in  
+    Azzalini and Capitanio (1999), while parameter `skew` correspond to 
+    :math:`\alpha\omega^{-1}` where :math:`\omega` is the square root of the 
+    diagonal elements of `cov`.
+    
+    The covariance matrix `cov` may be an instance of a subclass of
+    `Covariance`, e.g. `scipy.stats.CovViaPrecision`. If so, `allow_singular`
+    is ignored.
+    Otherwise, `cov` must be a symmetric positive semidefinite
+    matrix when `allow_singular` is True; it must be (strictly) positive
+    definite when `allow_singular` is False.
+    Symmetry is not checked; only the lower triangular portion is used.
+    The determinant and inverse of `cov` are computed
+    as the pseudo-determinant and pseudo-inverse, respectively, so
+    that `cov` does not need to have full rank.
+    The probability density function for `multivariate_skewnormal` is
+    
+    .. math::
+        f(x) = 2\phi(x - \mu, \Omega)\Phi\left((\alpha\omega^T(x - \mu)\right),
+    
+    where :math:`\mu` is the location, :math:`\Omega` the covariance matrix,
+    :math:`\alpha` the skewness and :math:`\omega` the square root of the 
+    diagonal of :math:`\Omega`.
+    :math:`\phi` and :math:`\Phi` are respectively the pdf of a multivariate 
+    normal with mean :math:`\mu` and variance-covariance :math:`\Omega` and 
+    the cdf of a standard univariate normal.
+    References
+    ----------
+    .. [1] Azzalini, A., and A. Capitanio. “Statistical Applications of the 
+    Multivariate Skew Normal Distribution.” Journal of the Royal Statistical Society. 
+    Series B (Statistical Methodology), vol. 61, no. 3, 1999, pp. 579-602 (24 pages)
+    .. [2] Azzalini, A. The R package 'sn': The Skew-Normal and Related Distributions 
+    such as the Skew-t and the SUN (version 2.1.1). https://CRAN.R-project.org/package=sn
+    Examples
+    --------
+    >>> import matplotlib.pyplot as plt
+    >>> from scipy.stats import multivariate_skewnormal
+    >>> x = np.linspace(0, 5, 10, endpoint=False)
+    >>> y = multivariate_skewnormal.pdf(x, loc=2.5, cov=0.5, skew=1); y
+    array([ 0.00108914,  0.01033349,  0.05946514,  0.20755375,  0.43939129,
+            0.56418958,  0.43939129,  0.20755375,  0.05946514,  0.01033349])
+    >>> fig1 = plt.figure()
+    >>> ax = fig1.add_subplot(111)
+    >>> ax.plot(x, y)
+    
+    The input quantiles can be any shape of array, as long as the last
+    axis labels the components.  This allows us for instance to
+    display the frozen pdf for a non-isotropic random variable in 2D as
+    follows:
+    >>> x, y = np.mgrid[-1:1:.01, -1:1:.01]
+    >>> pos = np.dstack((x, y))
+    >>> rv = multivariate_skewnormal([0.5, -0.2], [[2.0, 0.3], [0.3, 0.5]], [0.1, 0.4])
+    >>> fig2 = plt.figure()
+    >>> ax2 = fig2.add_subplot(111)
+    >>> ax2.contourf(x, y, rv.pdf(pos))
+    """
+
+    def __init__(self, seed=None):
+        super().__init__(seed)
+        self.__doc__ = doccer.docformat(self.__doc__, mvsn_docdict_params)
+
+    def __call__(self, loc=None, cov=1, skew=None, allow_singular=False, seed=None):
+        """Create a frozen multivariate skew-normal distribution.
+        See `multivariate_skewnormal_frozen` for more information.
+        """
+        return multivariate_skewnormal_frozen(loc, cov, skew,
+                                          allow_singular=allow_singular,
+                                          seed=seed)
+
+    def _process_parameters(self, loc, cov, skew, allow_singular=True):
+        """
+        Infer dimensionality from loc or covariance matrix, ensure that
+        mean and covariance are full vector resp. matrix.
+        """
+        if isinstance(cov, _covariance.Covariance):
+            return self._process_parameters_Covariance(loc, cov, skew)
+        else:
+            # Before `Covariance` classes were introduced,
+            # `multivariate_normal` accepted plain arrays as `cov` and used the
+            # following input validation. To avoid disturbing the behavior of
+            # `multivariate_normal` when plain arrays are used, we use the
+            # original input validation here.
+            dim, loc, cov, skew = self._process_parameters_psd(None, loc, cov, skew)
+            # After input validation, some methods then processed the arrays
+            # with a `_PSD` object and used that to perform computation.
+            # To avoid branching statements in each method depending on whether
+            # `cov` is an array or `Covariance` object, we always process the
+            # array with `_PSD`, and then use wrapper that satisfies the
+            # `Covariance` interface, `CovViaPSD`.
+            psd = _PSD(cov, allow_singular=allow_singular)
+            cov_object = _covariance.CovViaPSD(psd)
+            return dim, loc, cov_object, skew
+
+    def _process_parameters_Covariance(self, loc, cov, skew):
+        dim = cov.shape[-1]
+        loc = np.array([0.]) if loc is None else loc
+        skew = np.array([0.]) if skew is None else skew
+
+        message_loc = (f"`cov` represents a covariance matrix in {dim} dimensions,"
+                       f"and so `loc` must be broadcastable to shape {(dim,)}")
+        message_skew = (f"`cov` represents a covariance matrix in {dim} dimensions,"
+                        f"and so `skew` must be broadcastable to shape {(dim,)}")
+        try:
+            loc = np.broadcast_to(loc, dim)
+        except ValueError as e:
+            raise ValueError(message_loc) from e
+        try:
+            skew = np.broadcast_to(skew, dim)
+        except ValueError as e:
+            raise ValueError(message_skew) from e
+        return dim, loc, cov, skew
+
+    def _process_parameters_psd(self, dim, loc, cov, skew):
+        """
+        Infer dimensionality from location, covariance matrix or skewness, ensure that
+        location, covariance and skewness are full vector resp. matrix resp. vector.
+        """
+        # Try to infer dimensionality
+        if dim is None:
+            if loc is None:
+                if skew is None:
+                    if cov is None:
+                        dim = 1
+                    else:
+                        cov = np.asarray(cov, dtype=float)
+                        if cov.ndim < 2:
+                            dim = 1
+                        else:
+                            dim = cov.shape[0]
+                else:
+                    skew = np.asarray(skew, dtype=float)
+                    dim = skew.size
+            else:
+                loc = np.asarray(loc, dtype=float)
+                dim = loc.size
+        else:
+            if not np.isscalar(dim):
+                raise ValueError("Dimension of random variable must be "
+                                 "a scalar.")
+
+        # Check input sizes and return full arrays for loc and cov if
+        # necessary
+        if loc is None:
+            loc = np.zeros(dim)
+        loc = np.asarray(loc, dtype=float)
+
+        if cov is None:
+            cov = 1.0
+        cov = np.asarray(cov, dtype=float)
+
+        if skew is None:
+            skew = np.zeros(dim)
+        skew = np.asarray(skew, dtype=float)
+
+        if dim == 1:
+            loc.shape = (1,)
+            cov.shape = (1, 1)
+            skew.shape = (1,)
+
+        if loc.ndim != 1 or loc.shape[0] != dim:
+            raise ValueError("Array 'loc' must be a vector of length %d." %
+                             dim)
+        if skew.ndim != 1 or skew.shape[0] != dim:
+            # raise ValueError("Array `skew` has shape %d." % skew.shape)
+            raise ValueError("Array 'skew' must be a vector of length %d." %
+                             dim)
+        if cov.ndim == 0:
+            cov = cov * np.eye(dim)
+        elif cov.ndim == 1:
+            cov = np.diag(cov)
+        elif cov.ndim == 2 and cov.shape != (dim, dim):
+            rows, cols = cov.shape
+            if rows != cols:
+                msg = ("Array 'cov' must be square if it is two dimensional,"
+                       " but cov.shape = %s." % str(cov.shape))
+            else:
+                msg = ("Dimension mismatch: array 'cov' is of shape %s,"
+                       " but 'loc' is a vector of length %d.")
+                msg = msg % (str(cov.shape), len(loc))
+            raise ValueError(msg)
+        elif cov.ndim > 2:
+            raise ValueError("Array 'cov' must be at most two-dimensional,"
+                             " but cov.ndim = %d" % cov.ndim)
+
+        return dim, loc, cov, skew
+
+    def _process_quantiles(self, x, dim):
+        """
+        Adjust quantiles array so that last axis labels the components of
+        each data point.
+        """
+        x = np.asarray(x, dtype=float)
+
+        if x.ndim == 0:
+            x = x[np.newaxis]
+        elif x.ndim == 1:
+            if dim == 1:
+                x = x[:, np.newaxis]
+            else:
+                x = x[np.newaxis, :]
+
+        return x
+
+    def _logpdf(self, x, loc, cov_object, skew):
+        """Log of the multivariate skew-normal probability density function.
+        Parameters
+        ----------
+        x : ndarray
+            Points at which to evaluate the log of the probability
+            density function
+        loc : ndarray
+            loc of the distribution
+        cov_object : Covariance
+            An object representing the Covariance matrix
+        skew : ndarray
+            Skewness of the distribution
+        Notes
+        -----
+        As this function does no argument checking, it should not be
+        called directly; use 'logpdf' instead.
+        """
+        log_det_cov, rank = cov_object.log_pdet, cov_object.rank
+        dev = x - loc
+        if dev.ndim > 1:
+            log_det_cov = log_det_cov[..., np.newaxis]
+            rank = rank[..., np.newaxis]
+        maha = np.sum(np.square(cov_object.whiten(dev)), axis=-1)
+        mvnpart = -0.5 * (rank * _LOG_2PI + log_det_cov + maha)
+        cdfpart = _norm_logcdf(np.dot(dev, skew))
+        return 2 + mvnpart + cdfpart
+
+    def logpdf(self, x, loc=None, cov=1, skew=None, allow_singular=False):
+        """Log of the multivariate skew-normal probability density function.
+        
+        Parameters
+        ----------
+        x : array_like
+            Quantiles, with the last axis of `x` denoting the components.
+        %(_mvsn_doc_default_callparams)s
+        Returns
+        -------
+        pdf : ndarray or scalar
+            Log of the probability density function evaluated at `x`
+        
+        Notes
+        -----
+        %(_mvsn_doc_callparams_note)s
+        """
+        dim, loc, cov_object, skew = self._process_parameters(loc, cov, skew, allow_singular)
+        x = self._process_quantiles(x, dim)
+        out = self._logpdf(x, loc, cov_object, skew)
+        if np.any(cov_object.rank < dim):
+            out_of_bounds = ~cov_object._support_mask(x-mean)
+            out[out_of_bounds] = -np.inf
+        return _squeeze_output(out)
+
+    def pdf(self, x, loc=None, cov=1, skew=None, allow_singular=False):
+        """Multivariate skew-normal probability density function.
+        
+        Parameters
+        ----------
+        x : array_like
+            Quantiles, with the last axis of `x` denoting the components.
+        %(_mvsn_doc_default_callparams)s
+        
+        Returns
+        -------
+        pdf : ndarray or scalar
+            Probability density function evaluated at `x`
+        
+        Notes
+        -----
+        %(_mvsn_doc_callparams_note)s
+        """
+        dim, loc, cov_object, skew = self._process_parameters(loc, cov, skew, allow_singular)
+        x = self._process_quantiles(x, dim)
+        out = np.exp(self._logpdf(x, loc, cov_object, skew))
+        if np.any(cov_object.rank < dim):
+            out_of_bounds = ~cov_object._support_mask(x-loc)
+            out[out_of_bounds] = 0.0
+        return _squeeze_output(out)
+
+    def _cdf(self, x, mean, cov, maxpts, abseps, releps):
+        """Multivariate normal cumulative distribution function.
+        Parameters
+        ----------
+        x : ndarray
+            Points at which to evaluate the cumulative distribution function.
+        mean : ndarray
+            Mean of the distribution
+        cov : array_like
+            Covariance matrix of the distribution
+        maxpts : integer
+            The maximum number of points to use for integration
+        abseps : float
+            Absolute error tolerance
+        releps : float
+            Relative error tolerance
+        lower_limit : array_like, optional
+            Lower limit of integration of the cumulative distribution function.
+            Default is negative infinity. Must be broadcastable with `x`.
+        Notes
+        -----
+        As this function does no argument checking, it should not be
+        called directly; use 'cdf' instead.
+        """
+        lower = (np.full(mean.shape, -np.inf)
+                 if lower_limit is None else lower_limit)
+        # In 2d, _mvn.mvnun accepts input in which `lower` bound elements
+        # are greater than `x`. Not so in other dimensions. Fix this by
+        # ensuring that lower bounds are indeed lower when passed, then
+        # set signs of resulting CDF manually.
+        b, a = np.broadcast_arrays(x, lower)
+        i_swap = b < a
+        signs = (-1)**(i_swap.sum(axis=-1))  # odd # of swaps -> negative
+        a, b = a.copy(), b.copy()
+        a[i_swap], b[i_swap] = b[i_swap], a[i_swap]
+        n = x.shape[-1]
+        limits = np.concatenate((a, b), axis=-1)
+
+        # mvnun expects 1-d arguments, so process points sequentially
+        def func1d(limits):
+            return _mvn.mvnun(limits[:n], limits[n:], mean, cov,
+                              maxpts, abseps, releps)[0]
+
+        out = np.apply_along_axis(func1d, -1, limits) * signs
+        return _squeeze_output(out)
+
+    def logcdf(self, x, loc=None, cov=1, skew=None, allow_singular=False, 
+               maxpts=None, abseps=1e-5, releps=1e-5):
+        """Log of the multivariate skew normal cumulative distribution function.
+        
+        Parameters
+        ----------
+        x : array_like
+            Quantiles, with the last axis of `x` denoting the components.
+        %(_mvsn_doc_default_callparams)s
+        maxpts : integer, optional
+            The maximum number of points to use for integration
+            (default `1000000*dim`)
+        abseps : float, optional
+            Absolute error tolerance (default 1e-5)
+        releps : float, optional
+            Relative error tolerance (default 1e-5)
+        
+        Returns
+        -------
+        cdf : ndarray or scalar
+            Log of the cumulative distribution function evaluated at `x`
+        
+        Notes
+        -----
+        %(_mvsn_doc_callparams_note)s
+        .. versionadded:: 1.0.0
+        """
+        dim, loc, cov_object, skew = self._process_parameters(loc, cov, skew, allow_singular)
+        cov = cov_object.covariance
+        x = self._process_quantiles(x, dim)
+        if not maxpts:
+            maxpts = 1000000 * dim
+
+        delta = Oa / np.sqrt(1 + aOa)
+
+        omega, cor = _cov2cor(cov)
+        delta = _compute_delta(skew, cor, cor=True)
+
+        bigO = np.append(
+            np.append(1, -delta)[np.newaxis, :],
+            np.append(-delta[:, np.newaxis], cor, axis=1),
+            axis=0
+        )
+        xi = np.insert((x - loc) / omega, 0, 0., axis=-1)
+        zeros = np.zeros(shape=(1 + dim))
+
+        out = np.log(self._cdf(xi, zeros, bigO, maxpts, abseps, releps))
+        return out
+
+    def cdf(self, x, loc=None, cov=1, skew=None, allow_singular=False, 
+            maxpts=None, abseps=1e-5, releps=1e-5):
+        """Multivariate skew normal cumulative distribution function.
+        
+        Parameters
+        ----------
+        x : array_like
+            Quantiles, with the last axis of `x` denoting the components.
+        %(_mvsn_doc_default_callparams)s
+        maxpts : integer, optional
+            The maximum number of points to use for integration
+            (default `1000000*dim`)
+        abseps : float, optional
+            Absolute error tolerance (default 1e-5)
+        releps : float, optional
+            Relative error tolerance (default 1e-5)
+        
+        Returns
+        -------
+        cdf : ndarray or scalar
+            Cumulative distribution function evaluated at `x`
+        
+        Notes
+        -----
+        %(_mvsn_doc_callparams_note)s
+        .. versionadded:: 1.0.0
+        """
+        dim, loc, cov_object, skew = self._process_parameters(loc, cov, skew, allow_singular)
+        cov = cov_object.covariance
+        x = self._process_quantiles(x, dim)
+        if not maxpts:
+            maxpts = 1000000 * dim
+
+        omega, cor = _cov2cor(cov)
+        delta = _compute_delta(skew, cor, cor=True)
+        bigO = np.append(
+            np.append(1, -delta)[np.newaxis, :],
+            np.append(-delta[:, np.newaxis], cor, axis=1),
+            axis=0
+        )
+        xi = np.insert((x - loc) / omega, 0, 0., axis=-1)
+        zeros = np.zeros(shape=(1 + dim))
+
+        out = self._cdf(xi, zeros, bigO, maxpts, abseps, releps, lower_limit)
+        return out
+
+    def rvs(self, loc=None, cov=1, skew=None, size=1, random_state=None):
+        """Draw random samples from a multivariate skew-normal distribution.
+        
+        Parameters
+        ----------
+        %(_mvsn_doc_default_callparams)s
+        size : integer, optional
+            Number of samples to draw (default 1).
+        %(_doc_random_state)s
+        
+        Returns
+        -------
+        rvs : ndarray or scalar
+            Random variates of size (`size`, `N`), where `N` is the
+            dimension of the random variable.
+        
+        Notes
+        -----
+        %(_mvsn_doc_callparams_note)s
+        """
+        dim, loc, cov_object, skew = self._process_parameters(None, loc, cov, skew)
+        random_state = self._get_random_state(random_state)
+        cov = cov_object.covariance
+        omega, cor = _cov2cor(cov)
+        delta = _compute_delta(skew * omega, cor, cor=True)
+
+        bigO = np.append(
+            np.append(1, delta)[np.newaxis, :],
+            np.append(delta[:, np.newaxis], cor, axis=1),
+            axis=0
+        )
+        m = np.zeros(shape=(1 + dim))
+        out = random_state.multivariate_normal(m, bigO, size)
+        X0 = out[..., 0]
+        X = out[..., 1:]
+        Z = np.where(X0[:, np.newaxis] > 0, X, - X)
+
+        return _squeeze_output(loc + Z * omega)
+
+
+multivariate_skewnormal = multivariate_skewnormal_gen()
+
+
+class multivariate_skewnormal_frozen(multi_rv_frozen):
+    def __init__(self, loc=None, cov=1, skew=None, allow_singular=False, seed=None,
+                 maxpts=None, abseps=1e-5, releps=1e-5):
+        """Create a frozen multivariate skew-normal distribution.
+        
+        Parameters
+        ----------
+        loc : array_like, optional
+            loc of the distribution (default zero)
+        cov : array_like, optional
+            Covariance matrix of the distribution (default one)
+        skew : array_like, optional
+            skewness of the distribution (default zero)
+        allow_singular : bool, optional
+            If this flag is True then tolerate a singular
+            covariance matrix (default False).
+        seed : {None, int, `numpy.random.Generator`,
+                `numpy.random.RandomState`}, optional
+            If `seed` is None (or `np.random`), the `numpy.random.RandomState`
+            singleton is used.
+            If `seed` is an int, a new ``RandomState`` instance is used,
+            seeded with `seed`.
+            If `seed` is already a ``Generator`` or ``RandomState`` instance
+            then that instance is used.
+        maxpts : integer, optional
+            The maximum number of points to use for integration of the
+            cumulative distribution function (default `1000000*dim`)
+        abseps : float, optional
+            Absolute error tolerance for the cumulative distribution function
+            (default 1e-5)
+        releps : float, optional
+            Relative error tolerance for the cumulative distribution function
+            (default 1e-5)
+        
+        Examples
+        --------
+        When called with the default parameters, this will create a 1D random
+        variable with loc 0, covariance 1 and skewness 0:
+        >>> from scipy.stats import multivariate_skewnormal
+        >>> r = multivariate_skewnormal()
+        >>> r.loc
+        array([ 0.])
+        >>> r.cov
+        array([[1.]])
+        >>> r.skew
+        array([0.])
+        
+        """
+        self._dist = multivariate_skewnormal_gen(seed)
+        self.dim, self.loc, self.cov_object, self.skew = self._dist._process_parameters(loc, cov, skew, allow_singular)
+        self.allow_singular = allow_singular or self.cov_object._allow_singular
+        if not maxpts:
+            maxpts = 1000000 * self.dim
+        self.maxpts = maxpts
+        self.abseps = abseps
+        self.releps = releps
+
+    @property
+    def cov(self):
+        return self.cov_object.covariance
+
+    def logpdf(self, x):
+        out = self._dist._logpdf(x, self.loc, self.cov_object, self.skew)
+        if np.any(self.cov_object.rank < self.dim):
+            out_of_bounds = ~self.cov_object._support_mask(x-self.mean)
+            out[out_of_bounds] = -np.inf
+        return _squeeze_output(out)
+
+    def pdf(self, x):
+        return np.exp(self.logpdf(x))
+
+    def logcdf(self, x, *, lower_limit=None):
+        cdf = self.cdf(x, lower_limit=lower_limit)
+        # the log of a negative real is complex, and cdf can be negative
+        # if lower limit is greater than upper limit
+        cdf = cdf + 0j if np.any(cdf < 0) else cdf
+        out = np.log(cdf)
+        return out
+
+    def cdf(self, x, *, lower_limit=None):
+        x = self._dist._process_quantiles(x, self.dim)
+        out = self._dist.cdf(x, self.loc, self.cov_object, self.skew,
+                              self.maxpts, self.abseps, self.releps,
+                              lower_limit)
+        return _squeeze_output(out)
+
+    def rvs(self, size=1, random_state=None):
+        return self._dist.rvs(self.mean, self.cov, self.skew, size, random_state)
+
+# Set frozen generator docstrings from corresponding docstrings in
+# multivariate_skewnormal_gen and fill in default strings in class docstrings
+for name in ['logpdf', 'pdf', 'logcdf', 'cdf', 'rvs']:
+    method = multivariate_skewnormal_gen.__dict__[name]
+    method_frozen = multivariate_skewnormal_frozen.__dict__[name]
+    method_frozen.__doc__ = doccer.docformat(method.__doc__,
+                                             mvsn_docdict_noparams)
+    method.__doc__ = doccer.docformat(method.__doc__, mvsn_docdict_params)
+
 
 _matnorm_doc_default_callparams = """\
 mean : array_like, optional

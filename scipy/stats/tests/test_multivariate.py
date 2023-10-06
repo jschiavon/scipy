@@ -24,7 +24,7 @@ from scipy.stats import (multivariate_normal, multivariate_hypergeom,
                          matrix_normal, special_ortho_group, ortho_group,
                          random_correlation, unitary_group, dirichlet,
                          beta, wishart, multinomial, invwishart, chi2,
-                         invgamma, norm, uniform, ks_2samp, kstest, binom,
+                         invgamma, norm, skewnorm, uniform, ks_2samp, kstest, binom,
                          hypergeom, multivariate_t, cauchy, normaltest,
                          random_table, uniform_direction, vonmises_fisher,
                          dirichlet_multinomial, vonmises)
@@ -935,6 +935,449 @@ class TestMultivariateNormal:
         assert logp_perturbed < logp_fix
 
 
+class TestMultivariateSkewNormal:
+    def test_input_shape(self):
+        mu = np.arange(3)
+        cov = np.identity(2)
+        assert_raises(ValueError, multivariate_skewnormal.pdf, (0, 1), mu, cov)
+        assert_raises(ValueError, multivariate_skewnormal.pdf, (0, 1, 2), mu, cov)
+        assert_raises(ValueError, multivariate_skewnormal.cdf, (0, 1), mu, cov)
+        assert_raises(ValueError, multivariate_skewnormal.cdf, (0, 1, 2), mu, cov)
+
+    def test_scalar_values(self):
+        np.random.seed(1234)
+
+        # When evaluated on scalar data, the pdf should return a scalar
+        x, mean, cov, skew = 1.5, 1.7, 2.5, 0.7
+        pdf = multivariate_skewnormal.pdf(x, mean, cov, skew)
+        assert_equal(pdf.ndim, 0)
+
+        # When evaluated on a single vector, the pdf should return a scalar
+        x = np.random.randn(5)
+        mean = np.random.randn(5)
+        cov = np.abs(np.random.randn(5))  # Diagonal values for cov. matrix
+        skew = np.random.randn(5)
+        pdf = multivariate_skewnormal.pdf(x, mean, cov, skew)
+        assert_equal(pdf.ndim, 0)
+
+        # When evaluated on scalar data, the cdf should return a scalar
+        x, mean, cov, skew = 1.5, 1.7, 2.5, 0.7
+        cdf = multivariate_skewnormal.cdf(x, mean, cov, skew)
+        assert_equal(cdf.ndim, 0)
+
+        # When evaluated on a single vector, the cdf should return a scalar
+        x = np.random.randn(5)
+        mean = np.random.randn(5)
+        cov = np.abs(np.random.randn(5))  # Diagonal values for cov. matrix
+        skew = np.random.randn(5)
+        cdf = multivariate_skewnormal.cdf(x, mean, cov, skew)
+        assert_equal(cdf.ndim, 0)
+
+    def test_logpdf(self):
+        # Check that the log of the pdf is in fact the logpdf
+        np.random.seed(1234)
+        x = np.random.randn(5)
+        mean = np.random.randn(5)
+        cov = np.abs(np.random.randn(5))
+        skew = np.random.randn(5)
+        d1 = multivariate_skewnormal.logpdf(x, mean, cov, skew)
+        d2 = multivariate_skewnormal.pdf(x, mean, cov, skew)
+        assert_allclose(d1, np.log(d2))
+
+    def test_logpdf_default_values(self):
+        # Check that the log of the pdf is in fact the logpdf
+        # with default parameters Mean=None and cov = 1
+        np.random.seed(1234)
+        x = np.random.randn(5)
+        d1 = multivariate_skewnormal.logpdf(x)
+        d2 = multivariate_skewnormal.pdf(x)
+        # check whether default values are being used
+        d3 = multivariate_skewnormal.logpdf(x, None, 1, None)
+        d4 = multivariate_skewnormal.pdf(x, None, 1, None)
+        assert_allclose(d1, np.log(d2))
+        assert_allclose(d3, np.log(d4))
+        assert_allclose(d1, d3)
+        assert_allclose(d2, d4)
+
+    def test_logcdf(self):
+        # Check that the log of the cdf is in fact the logcdf
+        np.random.seed(1234)
+        x = np.random.randn(5)
+        mean = np.random.randn(5)
+        cov = np.abs(np.random.randn(5))
+        skew = np.random.randn(5)
+        d1 = multivariate_skewnormal.logcdf(x, mean, cov, skew)
+        d2 = multivariate_skewnormal.cdf(x, mean, cov, skew)
+        assert_allclose(d1, np.log(d2))
+
+    def test_logcdf_default_values(self):
+        # Check that the log of the cdf is in fact the logcdf
+        # with default parameters Mean=None and cov = 1
+        np.random.seed(1234)
+        x = np.random.randn(5)
+        d1 = multivariate_skewnormal.logcdf(x)
+        d2 = multivariate_skewnormal.cdf(x)
+        # check whether default values are being used
+        d3 = multivariate_skewnormal.logcdf(x, None, 1, None)
+        d4 = multivariate_skewnormal.cdf(x, None, 1, None)
+        assert_allclose(d1, np.log(d2))
+        assert_allclose(d3, np.log(d4))
+        assert_allclose(d1, d3)
+        assert_allclose(d2, d4)
+
+    def test_rank(self):
+        # Check that the rank is detected correctly.
+        np.random.seed(1234)
+        n = 4
+        mean = np.random.randn(n)
+        for expected_rank in range(1, n + 1):
+            s = np.random.randn(n, expected_rank)
+            cov = np.dot(s, s.T)
+            distn = multivariate_skewnormal(mean, cov, allow_singular=True)
+            assert_equal(distn.cov_object.rank, expected_rank)
+
+    def test_degenerate_distributions(self):
+
+        for n in range(1, 5):
+            z = np.random.randn(n)
+            for k in range(1, n):
+                # Sample a small covariance matrix.
+                s = np.random.randn(k, k)
+                cov_kk = np.dot(s, s.T)
+
+                # Embed the small covariance matrix into a larger singular one.
+                cov_nn = np.zeros((n, n))
+                cov_nn[:k, :k] = cov_kk
+
+                # Embed part of the vector in the same way
+                x = np.zeros(n)
+                x[:k] = z[:k]
+
+                # Define a rotation of the larger low rank matrix.
+                u = _sample_orthonormal_matrix(n)
+                cov_rr = np.dot(u, np.dot(cov_nn, u.T))
+                y = np.dot(u, x)
+
+                # Check some identities.
+                distn_kk = multivariate_skewnormal(np.zeros(k), cov_kk,
+                                               allow_singular=True)
+                distn_nn = multivariate_skewnormal(np.zeros(n), cov_nn,
+                                               allow_singular=True)
+                distn_rr = multivariate_skewnormal(np.zeros(n), cov_rr,
+                                               allow_singular=True)
+                assert_equal(distn_kk.cov_object.rank, k)
+                assert_equal(distn_nn.cov_object.rank, k)
+                assert_equal(distn_rr.cov_object.rank, k)
+                pdf_kk = distn_kk.pdf(x[:k])
+                pdf_nn = distn_nn.pdf(x)
+                pdf_rr = distn_rr.pdf(y)
+                assert_allclose(pdf_kk, pdf_nn)
+                assert_allclose(pdf_kk, pdf_rr)
+                logpdf_kk = distn_kk.logpdf(x[:k])
+                logpdf_nn = distn_nn.logpdf(x)
+                logpdf_rr = distn_rr.logpdf(y)
+                assert_allclose(logpdf_kk, logpdf_nn)
+                assert_allclose(logpdf_kk, logpdf_rr)
+
+                # Add an orthogonal component and find the density
+                y_orth = y + u[:, -1]
+                pdf_rr_orth = distn_rr.pdf(y_orth)
+                logpdf_rr_orth = distn_rr.logpdf(y_orth)
+
+                # Ensure that this has zero probability
+                assert_equal(pdf_rr_orth, 0.0)
+                assert_equal(logpdf_rr_orth, -np.inf)
+
+    def test_degenerate_array(self):
+        # Test that we can generate arrays of random variate from a degenerate
+        # multivariate normal, and that the pdf for these samples is non-zero
+        # (i.e. samples from the distribution lie on the subspace)
+        k = 10
+        for n in range(2, 6):
+            for r in range(1, n):
+                mn = np.zeros(n)
+                u = _sample_orthonormal_matrix(n)[:, :r]
+                vr = np.dot(u, u.T)
+                X = multivariate_skewnormal.rvs(mean=mn, cov=vr, size=k)
+
+                pdf = multivariate_skewnormal.pdf(X, mean=mn, cov=vr,
+                                              allow_singular=True)
+                assert_equal(pdf.size, k)
+                assert np.all(pdf > 0.0)
+
+                logpdf = multivariate_skewnormal.logpdf(X, mean=mn, cov=vr,
+                                                    allow_singular=True)
+                assert_equal(logpdf.size, k)
+                assert np.all(logpdf > -np.inf)
+
+
+    def test_broadcasting(self):
+        np.random.seed(1234)
+        n = 4
+
+        # Construct a random covariance matrix.
+        data = np.random.randn(n, n)
+        cov = np.dot(data, data.T)
+        mean = np.random.randn(n)
+        skew = np.random.randn(n)
+
+        # Construct an ndarray which can be interpreted as
+        # a 2x3 array whose elements are random data vectors.
+        X = np.random.randn(2, 3, n)
+
+        # Check that multiple data points can be evaluated at once.
+        desired_pdf = multivariate_skewnormal.pdf(X, mean, cov, skew)
+        desired_cdf = multivariate_skewnormal.cdf(X, mean, cov, skew)
+        for i in range(2):
+            for j in range(3):
+                actual = multivariate_skewnormal.pdf(X[i, j], mean, cov, skew)
+                assert_allclose(actual, desired_pdf[i,j])
+                # Repeat for cdf
+                actual = multivariate_skewnormal.cdf(X[i, j], mean, cov, skew)
+                assert_allclose(actual, desired_cdf[i,j], rtol=1e-3)
+
+    # def test_skewnormal_1D(self):
+    #     # The probability density function for a 1D skew-normal variable should
+    #     # agree with the standard normal distribution in scipy.stats.distributions
+    #     x = np.linspace(0, 2, 10)
+    #     mean, cov = 1.2, 0.9
+    #     scale = cov**0.5
+    #     skew = 0.3
+    #     d1 = skewnorm.pdf(x, skew)
+    #     d2 = multivariate_skewnormal.pdf(x, mean, cov, skew)
+    #     assert_allclose(d1, d2)
+    #     # The same should hold for the cumulative distribution function
+    #     d1 = skewnorm.cdf(x, mean, scale)
+    #     d2 = multivariate_skewnormal.cdf(x, mean, cov)
+    #     assert_allclose(d1, d2)
+
+    # def test_marginalization(self):
+    #     # Integrating out one of the variables of a 2D Gaussian should
+    #     # yield a 1D Gaussian
+    #     mean = np.array([2.5, 3.5])
+    #     cov = np.array([[.5, 0.2], [0.2, .6]])
+    #     n = 2 ** 8 + 1  # Number of samples
+    #     delta = 6 / (n - 1)  # Grid spacing
+
+    #     v = np.linspace(0, 6, n)
+    #     xv, yv = np.meshgrid(v, v)
+    #     pos = np.empty((n, n, 2))
+    #     pos[:, :, 0] = xv
+    #     pos[:, :, 1] = yv
+    #     pdf = multivariate_skewnormal.pdf(pos, mean, cov)
+
+    #     # Marginalize over x and y axis
+    #     margin_x = romb(pdf, delta, axis=0)
+    #     margin_y = romb(pdf, delta, axis=1)
+
+    #     # Compare with standard normal distribution
+    #     gauss_x = norm.pdf(v, loc=mean[0], scale=cov[0, 0] ** 0.5)
+    #     gauss_y = norm.pdf(v, loc=mean[1], scale=cov[1, 1] ** 0.5)
+    #     assert_allclose(margin_x, gauss_x, rtol=1e-2, atol=1e-2)
+    #     assert_allclose(margin_y, gauss_y, rtol=1e-2, atol=1e-2)
+
+    def test_frozen(self):
+        # The frozen distribution should agree with the regular one
+        np.random.seed(1234)
+        x = np.random.randn(5)
+        mean = np.random.randn(5)
+        cov = np.abs(np.random.randn(5))
+        skew = np.random.randn(5)
+        skewnorm_frozen = multivariate_skewnormal(mean, cov, skew)
+        assert_allclose(skewnorm_frozen.pdf(x), 
+                        multivariate_skewnormal.pdf(x, mean, cov, skew))
+        assert_allclose(skewnorm_frozen.logpdf(x),
+                        multivariate_skewnormal.logpdf(x, mean, cov, skew))
+        assert_allclose(skewnorm_frozen.cdf(x), 
+                        multivariate_skewnormal.cdf(x, mean, cov, skew))
+        assert_allclose(skewnorm_frozen.logcdf(x),
+                        multivariate_skewnormal.logcdf(x, mean, cov, skew))
+
+    @pytest.mark.parametrize(
+        'covariance',
+        [
+            np.eye(2),
+            Covariance.from_diagonal([1, 1]),
+        ]
+    )
+    def test_frozen_multivariate_normal_exposes_attributes(self, covariance):
+        mean = np.ones((2,))
+        cov_should_be = np.eye(2)
+        skew = np.ones((2,))
+        skewnorm_frozen = multivariate_skewnormal(mean, cov, skew)
+        assert np.allclose(skewnorm_frozen.mean, mean)
+        assert np.allclose(skewnorm_frozen.cov, cov_should_be)
+        assert np.allclose(skewnorm_frozen.skew, skew)
+
+    def test_exception_singular_cov(self):
+        np.random.seed(1234)
+        x = np.random.randn(5)
+        mean = np.random.randn(5)
+        skew = np.random.randn(5)
+        cov = np.ones((5, 5))
+        e = np.linalg.LinAlgError
+        assert_raises(e, multivariate_skewnormal, mean, cov, skew)
+        assert_raises(e, multivariate_skewnormal.pdf, x, mean, cov, skew)
+        assert_raises(e, multivariate_skewnormal.logpdf, x, mean, cov, skew)
+        assert_raises(e, multivariate_skewnormal.cdf, x, mean, cov, skew)
+        assert_raises(e, multivariate_skewnormal.logcdf, x, mean, cov, skew)
+
+        # Message used to be "singular matrix", but this is more accurate.
+        # See gh-15508
+        cov = [[1., 0.], [1., 1.]]
+        msg = "When `allow_singular is False`, the input matrix"
+        with pytest.raises(np.linalg.LinAlgError, match=msg):
+            multivariate_skewnormal(cov=cov)
+
+    def test_R_values(self):
+        # TODO
+        # Compare the multivariate pdf with some values precomputed
+        # in R version 3.0.1 (2013-05-16) on Mac OS X 10.6.
+
+        # The values below were generated by the following R-script:
+        # > library(mnormt)
+        # > x <- seq(0, 2, length=5)
+        # > y <- 3*x - 2
+        # > z <- x + cos(y)
+        # > mu <- c(1, 3, 2)
+        # > Sigma <- matrix(c(1,2,0,2,5,0.5,0,0.5,3), 3, 3)
+        # > r_pdf <- dmnorm(cbind(x,y,z), mu, Sigma)
+        r_pdf = np.array([0.0002214706, 0.0013819953, 0.0049138692,
+                          0.0103803050, 0.0140250800])
+
+        x = np.linspace(0, 2, 5)
+        y = 3 * x - 2
+        z = x + np.cos(y)
+        r = np.array([x, y, z]).T
+
+        mean = np.array([1, 3, 2], 'd')
+        cov = np.array([[1, 2, 0], [2, 5, .5], [0, .5, 3]], 'd')
+
+        pdf = multivariate_normal.pdf(r, mean, cov)
+        assert_allclose(pdf, r_pdf, atol=1e-10)
+
+        # Compare the multivariate cdf with some values precomputed
+        # in R version 3.3.2 (2016-10-31) on Debian GNU/Linux.
+
+        # The values below were generated by the following R-script:
+        # > library(mnormt)
+        # > x <- seq(0, 2, length=5)
+        # > y <- 3*x - 2
+        # > z <- x + cos(y)
+        # > mu <- c(1, 3, 2)
+        # > Sigma <- matrix(c(1,2,0,2,5,0.5,0,0.5,3), 3, 3)
+        # > r_cdf <- pmnorm(cbind(x,y,z), mu, Sigma)
+        r_cdf = np.array([0.0017866215, 0.0267142892, 0.0857098761,
+                          0.1063242573, 0.2501068509])
+
+        cdf = multivariate_normal.cdf(r, mean, cov)
+        assert_allclose(cdf, r_cdf, atol=2e-5)
+
+        # Also test bivariate cdf with some values precomputed
+        # in R version 3.3.2 (2016-10-31) on Debian GNU/Linux.
+
+        # The values below were generated by the following R-script:
+        # > library(mnormt)
+        # > x <- seq(0, 2, length=5)
+        # > y <- 3*x - 2
+        # > mu <- c(1, 3)
+        # > Sigma <- matrix(c(1,2,2,5), 2, 2)
+        # > r_cdf2 <- pmnorm(cbind(x,y), mu, Sigma)
+        r_cdf2 = np.array([0.01262147, 0.05838989, 0.18389571,
+                           0.40696599, 0.66470577])
+
+        r2 = np.array([x, y]).T
+
+        mean2 = np.array([1, 3], 'd')
+        cov2 = np.array([[1, 2], [2, 5]], 'd')
+
+        cdf2 = multivariate_normal.cdf(r2, mean2, cov2)
+        assert_allclose(cdf2, r_cdf2, atol=1e-5)
+
+    def test_multivariate_skewnormal_rvs_zero_covariance(self):
+        mean = np.zeros(2)
+        covariance = np.zeros((2, 2))
+        skew = np.zeros(2)
+        model = multivariate_skewnormal(mean, covariance, skew, allow_singular=True)
+        sample = model.rvs()
+        assert_equal(sample, [0, 0])
+
+    def test_rvs_shape(self):
+        # Check that rvs parses the mean and covariance correctly, and returns
+        # an array of the right shape
+        N = 300
+        d = 4
+        sample = multivariate_skewnormal.rvs(mean=np.zeros(d), cov=1, skew=np.zeros(d), size=N)
+        assert_equal(sample.shape, (N, d))
+
+        sample = multivariate_skewnormal.rvs(mean=None,
+                                         cov=np.array([[2, .1], [.1, 1]]),
+                                         skew=None,
+                                         size=N)
+        assert_equal(sample.shape, (N, 2))
+
+        u = multivariate_skewnormal(mean=0, cov=1, skew=0)
+        sample = u.rvs(N)
+        assert_equal(sample.shape, (N, ))
+
+    def test_large_sample(self):
+        # Generate large sample and compare sample mean and sample covariance
+        # with mean and covariance matrix.
+
+        np.random.seed(2846)
+
+        n = 3
+        mean = np.random.randn(n)
+        M = np.random.randn(n, n)
+        cov = np.dot(M, M.T)
+        skew = np.random.randn(n)
+        size = 5000
+
+        sample = multivariate_skewnormal.rvs(mean, cov, skew, size)
+
+        assert_allclose(numpy.cov(sample.T), cov, rtol=1e-1)
+        assert_allclose(sample.mean(0), mean, rtol=1e-1)
+
+    def test_cdf_with_lower_limit_arrays(self):
+        # test CDF with lower limit in several dimensions
+        rng = np.random.default_rng(2408071309372769818)
+        mean = [0, 0]
+        cov = np.eye(2)
+        skew = [0, 0]
+        a = rng.random((4, 3, 2))*6 - 3
+        b = rng.random((4, 3, 2))*6 - 3
+
+        cdf1 = multivariate_skewnormal.cdf(b, mean, cov, skew, lower_limit=a)
+
+        cdf2a = multivariate_skewnormal.cdf(b, mean, cov, skew)
+        cdf2b = multivariate_skewnormal.cdf(a, mean, cov, skew)
+        ab1 = np.concatenate((a[..., 0:1], b[..., 1:2]), axis=-1)
+        ab2 = np.concatenate((a[..., 1:2], b[..., 0:1]), axis=-1)
+        cdf2ab1 = multivariate_skewnormal.cdf(ab1, mean, cov, skew)
+        cdf2ab2 = multivariate_skewnormal.cdf(ab2, mean, cov, skew)
+        cdf2 = cdf2a + cdf2b - cdf2ab1 - cdf2ab2
+
+        assert_allclose(cdf1, cdf2)
+
+    def test_cdf_with_lower_limit_consistency(self):
+        # check that multivariate normal CDF functions are consistent
+        rng = np.random.default_rng(2408071309372769818)
+        mean = rng.random(3)
+        cov = rng.random((3, 3))
+        cov = cov @ cov.T
+        a = rng.random((2, 3))*6 - 3
+        b = rng.random((2, 3))*6 - 3
+
+        cdf1 = multivariate_skewnormal.cdf(b, mean, cov, skew, lower_limit=a)
+        cdf2 = multivariate_skewnormal(mean, cov, skew).cdf(b, lower_limit=a)
+        cdf3 = np.exp(multivariate_skewnormal.logcdf(b, mean, cov, skew, lower_limit=a))
+        cdf4 = np.exp(multivariate_skewnormal(mean, cov, skew).logcdf(b, lower_limit=a))
+
+        assert_allclose(cdf2, cdf1, rtol=1e-4)
+        assert_allclose(cdf3, cdf1, rtol=1e-4)
+        assert_allclose(cdf4, cdf1, rtol=1e-4)
+
+    
 class TestMatrixNormal:
 
     def test_bad_input(self):
